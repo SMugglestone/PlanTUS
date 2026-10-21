@@ -145,18 +145,27 @@ os.chdir(plantus_code_path)
 import PlanTUS as PlanTUS
 
 
-# Prepare output directory named by ROI
+# # Prepare output directory named by ROI
+# roi_fname = os.path.split(target_roi_filepath)[1]
+# roi_name = roi_fname.replace(".nii", "").replace(".gz", "")
+# # Base directory PlanTUS writes its "PlanTUS/<roi_name>" output folder
+# # under. Defaults to the m2m folder (next to the .msh file) if
+# # "output_folder" isn't set in the config — same layout as before,
+# # just with a configurable base directory.
+# output_base = config.get("output_folder") or os.path.split(simnibs_mesh_filepath)[0]
+# output_path = os.path.join(output_base, "PlanTUS", roi_name)
+# os.makedirs(output_path, exist_ok=True)
+# shutil.copy(target_roi_filepath, output_path)
+# target_roi_filepath = os.path.join(output_path, roi_fname)
+
+# Put outputs beside the input ROI volume.
 roi_fname = os.path.split(target_roi_filepath)[1]
 roi_name = roi_fname.replace(".nii", "").replace(".gz", "")
-# Base directory PlanTUS writes its "PlanTUS/<roi_name>" output folder
-# under. Defaults to the m2m folder (next to the .msh file) if
-# "output_folder" isn't set in the config — same layout as before,
-# just with a configurable base directory.
-output_base = config.get("output_folder") or os.path.split(simnibs_mesh_filepath)[0]
-output_path = os.path.join(output_base, "PlanTUS", roi_name)
+
+output_path = os.path.dirname(os.path.abspath(target_roi_filepath))
 os.makedirs(output_path, exist_ok=True)
-shutil.copy(target_roi_filepath, output_path)
 target_roi_filepath = os.path.join(output_path, roi_fname)
+
 # -----------------------------------------------------------------------------
 # Check for existing results for this exact combination of inputs
 # -----------------------------------------------------------------------------
