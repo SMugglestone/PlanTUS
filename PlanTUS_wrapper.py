@@ -27,6 +27,7 @@ import platform
 import os
 import sys
 from pathlib import Path
+from tempfile import TemporaryDirectory
 import yaml
 
 _IS_MAC = platform.system() == 'Darwin'
@@ -202,9 +203,14 @@ current_run_parameters = {
 }
 
 # Files that only exist once the full computation has completed successfully
+surface_files = [
+    "skin.surf.gii", "skin.stl",
+    "skull.surf.gii", "skull.stl",
+    "skull_inner_surface.surf.gii", "skull_inner_surface.stl",
+]
+
 _expected_output_files = [
-    "skin.surf.gii",
-    "skull.surf.gii",
+    *surface_files,
     "distances_skin.func.gii",
     "distances_skin_thresholded.func.gii",
     "target_intersection_skin.func.gii",
@@ -267,15 +273,35 @@ if args.placement_only<0:
         # -----------------------------------------------------------------------------
         # Convert SimNIBS meshes to surfaces (STL + GIFTI); annotate structures
         # -----------------------------------------------------------------------------
+        roi_dir = Path(output_path)
+        subject_dir = roi_dir.parent
 
-        # Skin
-        PlanTUS.convert_simnibs_mesh_to_surfaces(simnibs_mesh_filepath, [1005], "skin", output_path,
-                                                 smoothing_iterations=skin_smoothing_iterations)
-        PlanTUS.add_structure_information(output_path + "/skin.surf.gii", "CORTEX_LEFT")
+        # Prepare shared skin and skull surfaces for all ROIs 
+        if not all((subject_dir / filename).is_file() for filename in surface_files):
+            with TemporaryDirectory(dir=subject_dir) as tmp:
+                PlanTUS.convert_simnibs_mesh_to_surfaces(
+                    simnibs_mesh_filepath, [1005], "skin", tmp,
+                    smoothing_iterations=skin_smoothing_iterations,
+                )
+                PlanTUS.add_structure_information(os.path.join(tmp, "skin.surf.gii"), "CORTEX_LEFT")
 
-        # Skull
-        PlanTUS.convert_simnibs_mesh_to_surfaces(simnibs_mesh_filepath, [1007], "skull", output_path)
-        PlanTUS.add_structure_information(output_path + "/skull.surf.gii", "CORTEX_RIGHT")
+                PlanTUS.convert_simnibs_mesh_to_surfaces(simnibs_mesh_filepath, [1007], "skull", tmp)
+                PlanTUS.add_structure_information(os.path.join(tmp, "skull.surf.gii"), "CORTEX_RIGHT")
+
+                PlanTUS.convert_simnibs_mesh_to_surfaces(
+                    simnibs_mesh_filepath, [1001, 1002, 1003, 1009], "skull_inner_surface", tmp,
+                )
+
+                for filename in surface_files:
+                    (Path(tmp) / filename).replace(subject_dir / filename)
+
+        # Create symlink in ROI directory
+        for filename in surface_files:
+            link = roi_dir / filename
+            target = Path("..") / filename
+            if link.is_symlink() and link.readlink() == target:
+                continue
+            link.symlink_to(target)
 
 
         # -----------------------------------------------------------------------------
@@ -411,7 +437,6 @@ if args.placement_only<0:
         # Skull thickness (outer→inner or outer→outer where needed)
         # (skull.surf.gii/.stl already extracted earlier in this run — no
         # need to re-read the full .msh file and rebuild an identical result)
-        PlanTUS.convert_simnibs_mesh_to_surfaces(simnibs_mesh_filepath, [1001, 1002, 1003, 1009], "skull_inner_surface", output_path)
 
         skull_coords, skull_normals = PlanTUS.compute_surface_metrics(os.path.join(output_path, "skull.surf.gii"))
         skull_inner_hits = PlanTUS.compute_vector_mesh_intersections(skull_coords, skull_normals, os.path.join(output_path, "skull_inner_surface.stl"), 100)
