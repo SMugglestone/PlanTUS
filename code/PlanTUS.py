@@ -1617,8 +1617,11 @@ def prepare_acoustic_simulation(vertex_number: int,
     skin_target_vectors = vectors_between_surface_and_point(os.path.join(output_path, "skin.surf.gii"), target_center)
 
     skin_target_intersections = compute_vector_mesh_intersections(
-        skin_coordinates, skin_normals, os.path.join(output_path, f"{target_roi_name}_3Dmodel.stl"), 200
-    )
+        skin_coordinates[vertex_number : vertex_number + 1],
+        skin_normals[vertex_number : vertex_number + 1],
+        os.path.join(output_path, f"{target_roi_name}_3Dmodel.stl"),
+        200
+    )  # Only compute the vertex that is selected later
     skin_target_intersection_values = []
     for inter in skin_target_intersections:
         if len(inter) == 1:
@@ -1657,14 +1660,14 @@ def prepare_acoustic_simulation(vertex_number: int,
     # Moved earlier (was after the transducer-model/.kps export block)
     # so inter_center is available below for the BabelBrain trajectory
     # anchor point too, without duplicating this computation.
-    if skin_target_intersection_values[vertex_number] == 0:
+    if skin_target_intersection_values[0] == 0:
         target_center = roi_center_of_gravity(target_roi_filepath)
         skin_target_distances = distance_between_surface_and_point(os.path.join(output_path, "skin.surf.gii"), target_center)
         focal_distance = float(skin_target_distances[vertex_number] + additional_offset)
         inter_center = None
     else:
-        inter_center = (np.asarray(skin_target_intersections[vertex_number][0]) +
-                        np.asarray(skin_target_intersections[vertex_number][1])) / 2.0
+        inter_center = (np.asarray(skin_target_intersections[0][0]) +
+                        np.asarray(skin_target_intersections[0][1])) / 2.0
         focal_distance = float(np.linalg.norm(skin_coordinates[vertex_number] - inter_center) + additional_offset)
 
     focal_distance = max(min(focal_distance, max_distance), min_distance)
