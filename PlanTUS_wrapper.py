@@ -459,7 +459,6 @@ if args.placement_only<0:
         # -----------------------------------------------------------------------------
         # Zero-out invalid vertices using distance/avoidance
         skin_target_distances_m = skin_target_distances.copy()
-        skin_target_distances_m[skin_target_distances > max_distance] = 0
         skin_target_distances_m[avoidance_mask == 0] = 0
 
         angles_m = angles.copy()
@@ -488,10 +487,18 @@ if args.placement_only<0:
         w_delta = float(weight_skin_skull_angles)
         w_t = float(weight_skull_thickness)
 
-        # Distance utility (best at optimal, worst at max)
-        d_best, d_worst = float(optimal_distance), float(max_distance)
+        # Distance utility (best at optimal depth)
+        required_depth = skin_target_distances_m.copy()
+        required_depth[required_depth != 0] += additional_offset # Add the skin-to-exit-plane offset (mm)
+        # Scale the denominator by the available steering range either side of the optimum depth.
+        distance_range = np.where(
+            required_depth < optimal_distance,
+            optimal_distance - min_distance,
+            max_distance - optimal_distance,
+        )
+        # Metric peaks at the optimal depth and reaches 0 at the steering limits.
         with np.errstate(divide='ignore', invalid='ignore'):
-            u_d = np.clip(((d_best - skin_target_distances_m) / (d_best - d_worst)) ** p_d, 0, 1)
+            u_d = np.clip((1 - np.abs(required_depth - optimal_distance) / distance_range) ** p_d, 0, 1)
             u_d[~np.isfinite(u_d)] = 0
 
         # Intersection utility (more is better)
