@@ -52,3 +52,13 @@ weight_skull_thickness: 0.2
 # output_folder: /path/to/custom/output/base
 # Optional: Taubin smoothing iterations for the skin surface (default 2, 0 = off)
 # skin_smoothing_iterations: 2
+# Optional: target conflict -- keep the beam away from region(s) that should not be sonicated (masks on the T1 grid).
+# Masks are normally given on the command line (--conflict-mask FILE[,margin=MM][,mode=hard|soft][,weight=W], repeatable) or
+# listed here. A placement whose beam (skin vertex -> target centre -> half the focal length past it) passes within `margin`
+# of a mask is removed (hard) or penalised (soft). Everything is off unless a mask is given. See code/TargetConflict.py.
+# target_conflict_masks: []              # e.g. [{path: /abs/dlpfc.nii.gz, margin: 5, mode: soft, weight: 2}]
+# weight_target_conflict: 1.0            # exponent of the conflict factor in the composite (0 switches it off)
+# target_conflict_margin: 3.0            # mm; default for masks that do not set their own
+# target_conflict_mode: hard             # hard: any conflict removes the position. soft: penalised by beam length inside
+# target_conflict_full_mm: 20.0          # soft mode: mm of beam inside a mask that gives utility 0
+# target_conflict_beyond: null           # mm to follow the beam past the target; null = half the calibrated focal length

@@ -207,6 +207,19 @@ PlanTUS generates a simple cylindrical transducer model, sized to your config's 
 
 ---
 
+## Target conflict (optional): keep the beam away from a region
+
+To stop the transducer's beam passing through a region that should not be sonicated (a mask in the same space as the T1), add it when running PlanTUS:
+
+```
+simnibs_python PlanTUS_wrapper.py T1.nii.gz head.msh target.nii.gz config.yaml --conflict-mask region.nii.gz
+simnibs_python PlanTUS_wrapper.py ... --conflict-mask a.nii.gz,margin=5 --conflict-mask b.nii.gz,mode=soft,weight=2
+```
+
+For every skin vertex the beam is the line from the vertex to the target centre, continued past the target by half the calibrated focal length. A vertex is penalised if that line passes within `margin` mm (default 3) of a conflict mask. In `hard` mode (default) that vertex can never be chosen; in `soft` mode the score falls with the length of beam inside the region. The penalty is an absolute factor (1 = no conflict), so it does not depend on how many positions happen to avoid the region, and the five existing weights are unchanged. With no conflict masks the output is identical to before. The ranking composite gains `_TargetConflict<weight>` in its name, and `composite-noconflict_...` keeps the original so the margin can be changed afterwards. Settings and the new maps are listed in `CHANGELOG.md` and `code/TargetConflict.py`; `simnibs_python tests/test_target_conflict.py` checks the geometry (re-run it after merging an upstream PlanTUS).
+
+This is a geometric planning aid, not a safety check: it ignores skull aberration and side lobes. Pass the chosen trajectory through a full acoustic simulation (e.g. BabelBrain).
+
 ## 2. Run the *PlanTUS_wrapper.py* script
 
 Based on the subject-specific, 3D-reconstructed skin and skull surfaces as well as the mask of the target region, PlanTUS computes several per-vertex metrics across the entire head surface to help you intuitively evaluate potential transducer positions. See [Output reference](#output-reference) below for the full list and how they combine into a single composite score. In brief:

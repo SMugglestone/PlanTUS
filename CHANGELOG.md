@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- **Target conflict** (`code/TargetConflict.py`, `tests/test_target_conflict.py`): penalise transducer placements whose beam passes through, or within a margin of, one or more masks (T1 space) of regions that should not be sonicated. It reverses the target-intersection idea: each mask becomes a smoothed STL (`stl_from_nii`), one ray per skin vertex is intersected with it (`compute_vector_mesh_intersections`), and the length of beam inside is read from the hits, pairing every hit. The ray follows the real beam axis (skin vertex to target centre, as `prepare_acoustic_simulation` aims the transducer) and continues past the target by half the calibrated focal length (or `target_conflict_beyond` mm). `margin` dilates the mask first. Per mask `hard` (any conflict removes the position) or `soft` (utility falls with beam length inside); the composite is multiplied by `prod(utility ** (weight_target_conflict * weight))`, an absolute factor that is never min-max scaled. With no masks nothing changes (verified: identical composite, filename and run fingerprint).
+  - Command line: `--conflict-mask FILE[,margin=MM][,mode=hard|soft][,weight=W]` (repeatable); config keys `target_conflict_masks`, `weight_target_conflict`, `target_conflict_margin`, `target_conflict_mode`, `target_conflict_full_mm`, `target_conflict_beyond`.
+  - New outputs: `composite_..._TargetConflict<w>_skin.func.gii` (the composite used for ranking), `composite-noconflict_..._skin.func.gii` (without it, so it can be recombined with another margin), `target_conflict-<mask>_skin.func.gii` (mm of beam inside each mask), `target_conflict_utility_skin.func.gii`, the dilated masks and their meshes, and `target_conflict.json`.
+  - The run fingerprint (`PlanTUS_run_parameters.json`) includes the masks' checksums and settings, so cached results are not reused when they change.
+  - `python code/TargetConflict.py prepare ...` checks and stages masks for scripts.
+  - The composite file name is now built in one place (`composite_basename`) instead of two copies.
+  - This is a geometric planning aid; it does not model skull aberration or side lobes.
+
 ## v2.0.0
 
 **Tested under:** Python 3.11.10, SimNIBS 4.5.0, numpy 1.26.4, scipy 1.14.1, nibabel 5.3.0, nilearn 0.14.0, pandas 3.0.3, PyYAML 6.0.2, h5py 3.11.0, trimesh 5.1.0, vtk 9.6.2, PyQt5 5.15.11 (Linux, x86_64).

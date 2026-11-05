@@ -59,7 +59,15 @@ if __name__ == "__main__":
     parser.add_argument("--overwrite", action="store_true", help="If existing PlanTUS results are found for the same inputs, overwrite them without prompting.")
     parser.add_argument("--reuse_existing", action="store_true", help="If existing PlanTUS results are found for the same inputs, reuse them without prompting.")
 
+    parser.add_argument("--conflict-mask", action="append", default=[], metavar="FILE[,margin=MM][,mode=hard|soft][,weight=W]",
+                        help="Target conflict: a mask (in the T1's space) whose region the beam should not pass through, or "
+                             "close to. Repeatable. margin/mode/weight default to target_conflict_margin / target_conflict_mode "
+                             "in the config / 1. Adds a heavily weighted factor to the composite; see code/TargetConflict.py.")
+
     args = parser.parse_args()
+    # the wrapper changes directory below, so a relative mask path has to be made absolute now
+    args.conflict_mask = [os.path.abspath(os.path.expanduser(m.split(",", 1)[0])) + ("," + m.split(",", 1)[1] if "," in m else "")
+                          for m in args.conflict_mask]
 #===============================================================================
 #===============================================================================
 # Configure inputs
@@ -82,6 +90,7 @@ target_roi_filepath = args.roi
 # Transducer-specific variables ------------------------------------------------
 with open(args.config, 'r') as file:
     config = yaml.safe_load(file)
+config_dir = os.path.dirname(os.path.abspath(args.config))  # taken now: the wrapper changes directory below
 
 IDTarget = config.get("IDTarget", "")
 
@@ -141,9 +150,15 @@ import sys
 import shutil
 import numpy as np
 import math
+import glob
 sys.path.append(plantus_code_path)
 os.chdir(plantus_code_path)
 import PlanTUS as PlanTUS
+import TargetConflict
+
+# Target conflict masks (config list + --conflict-mask); empty means the metric is off and nothing below changes
+conflict_specs = TargetConflict.collect_specs(config, args.conflict_mask, base_dir=config_dir)
+weight_target_conflict = float(config.get("weight_target_conflict", 1.0))
 
 # Prepare output directories
 roi_fname = os.path.split(target_roi_filepath)[1]
@@ -196,6 +211,24 @@ current_run_parameters = {
     "weight_skin_skull_angles": weight_skin_skull_angles,
     "weight_skull_thickness": weight_skull_thickness,
 }
+_tc_fingerprint = TargetConflict.fingerprint(conflict_specs, config)
+if _tc_fingerprint:  # only present when masks are given, so runs without them keep their old fingerprint
+    current_run_parameters["target_conflict"] = _tc_fingerprint
+
+
+def composite_basename(with_conflict=True):
+    """File name stem of the composite metric. Defined once so the fresh-run and the cached-run paths cannot drift apart."""
+    base = (
+        "composite_"
+        f"TargetDistance{weight_skin_target_distances}_"
+        f"TargetAngle{weight_skin_target_angles}_"
+        f"TargetIntersection{weight_skin_target_intersections}_"
+        f"SkinSkullAngle{weight_skin_skull_angles}_"
+        f"SkullThickness{weight_skull_thickness}"
+    )
+    if with_conflict and conflict_specs:
+        base += f"_TargetConflict{weight_target_conflict}"
+    return base
 
 # Files that only exist once the full computation has completed successfully
 surface_files = [
@@ -576,15 +609,37 @@ if args.placement_only<0:
         # Geometric aggregation
         composite_metric = (np.power(u_align, w_align) * np.power(u_d, w_d) * np.power(u_delta, w_delta) * np.power(u_t, w_t))
 
+        # Target conflict: penalise positions whose beam passes through (or near) the conflict mask(s). The composite
+        # without it is kept (composite-noconflict_*) so it can be recombined with a different margin, e.g. in the viewer.
+        # Files from an earlier run in this folder (with other masks, or none) must not be mistaken for this run's results
+        # by anything that globs composite_*skin.func.gii, so they are removed first.
+        for _pattern in ("composite_*_skin.func.gii", "composite-noconflict_*_skin.func.gii", "target_conflict-*_skin.func.gii",
+                         "target_conflict-*.nii.gz", "target_conflict-*_3Dmodel.*", "target_conflict_utility_skin.func.gii",
+                         "target_conflict.json"):
+            for _stale in glob.glob(os.path.join(output_path, _pattern)):
+                os.remove(_stale)
+        if conflict_specs:
+            skin_surface_filepath = os.path.join(output_path, "skin.surf.gii")
+            skin_xyz, _ = PlanTUS.compute_surface_metrics(skin_surface_filepath)
+            noconflict_base = composite_basename(False).replace("composite_", "composite-noconflict_", 1)
+            PlanTUS.create_metric_from_pseudo_nifti(noconflict_base, composite_metric, skin_surface_filepath)
+            PlanTUS.mask_metric(os.path.join(output_path, noconflict_base + "_skin.func.gii"), os.path.join(output_path, "avoidance_skin.func.gii"))
+            PlanTUS.add_structure_information(os.path.join(output_path, noconflict_base + "_skin.func.gii"), "CORTEX_LEFT")
+
+            conflict = TargetConflict.compute_target_conflict(skin_xyz, center, conflict_specs, config, composite_metric > 0,
+                                                              output_path, PlanTUS)
+            composite_metric = composite_metric * conflict["factor"]
+            for _name, _d in conflict["per_mask"].items():
+                PlanTUS.create_metric_from_pseudo_nifti(f"target_conflict-{_name}", _d["length"], skin_surface_filepath)
+                PlanTUS.mask_metric(os.path.join(output_path, f"target_conflict-{_name}_skin.func.gii"), os.path.join(output_path, "avoidance_skin.func.gii"))
+                PlanTUS.add_structure_information(os.path.join(output_path, f"target_conflict-{_name}_skin.func.gii"), "CORTEX_LEFT")
+            PlanTUS.create_metric_from_pseudo_nifti("target_conflict_utility", conflict["factor"], skin_surface_filepath)
+            PlanTUS.mask_metric(os.path.join(output_path, "target_conflict_utility_skin.func.gii"), os.path.join(output_path, "avoidance_skin.func.gii"))
+            PlanTUS.add_structure_information(os.path.join(output_path, "target_conflict_utility_skin.func.gii"), "CORTEX_LEFT")
+            TargetConflict.write_sidecar(os.path.join(output_path, "target_conflict.json"), conflict["summary"])
+
         # Persist composite metric
-        metric_base = (
-        "composite_"
-        f"TargetDistance{weight_skin_target_distances}_"
-        f"TargetAngle{weight_skin_target_angles}_"
-        f"TargetIntersection{weight_skin_target_intersections}_"
-        f"SkinSkullAngle{weight_skin_skull_angles}_"
-        f"SkullThickness{weight_skull_thickness}"
-        )
+        metric_base = composite_basename()
 
         PlanTUS.create_metric_from_pseudo_nifti(metric_base, composite_metric, os.path.join(output_path, "skin.surf.gii"))
         PlanTUS.mask_metric(os.path.join(output_path, metric_base + "_skin.func.gii"), os.path.join(output_path, "avoidance_skin.func.gii"))
@@ -600,14 +655,7 @@ if args.placement_only<0:
     # weight config values below — recomputed here (not reused from the
     # fresh-run branch above) so it's valid whether this run just computed
     # everything or loaded cached outputs from a previous run.
-    metric_base = (
-        "composite_"
-        f"TargetDistance{weight_skin_target_distances}_"
-        f"TargetAngle{weight_skin_target_angles}_"
-        f"TargetIntersection{weight_skin_target_intersections}_"
-        f"SkinSkullAngle{weight_skin_skull_angles}_"
-        f"SkullThickness{weight_skull_thickness}"
-    )
+    metric_base = composite_basename()
 
     # --- Sanity check: T1 and SimNIBS mesh must share a world space
     # (warns only). Runs here so it covers fresh and cached runs alike.
