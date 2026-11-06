@@ -202,6 +202,18 @@ class ConflictMask:
 # -----------------------------------------------------------------------------
 # Beam geometry
 # -----------------------------------------------------------------------------
+def flhm_function(cfg: dict, plantus):
+    """Calibrated focal length (FLHM, mm) as a function of focal distance: PlanTUS' own cubic fit, evaluated once on a
+    0.5 mm grid and interpolated (compute_FLHM_for_focal_distance refits on every call)."""
+    lo, hi = float(cfg["min_distance"]), float(cfg["max_distance"])
+    if len(cfg["flhm_list"]) <= 1:
+        const = float(plantus.compute_FLHM_for_focal_distance(lo, cfg["focal_distance_list"], cfg["flhm_list"]))
+        return lambda f: np.full(np.shape(f), const)
+    grid = np.arange(lo, hi + 0.5, 0.5)
+    table = np.array([plantus.compute_FLHM_for_focal_distance(f, cfg["focal_distance_list"], cfg["flhm_list"]) for f in grid])
+    return lambda f: np.interp(f, grid, table)
+
+
 def beyond_mm(cfg: dict, distances: np.ndarray, plantus) -> np.ndarray:
     """How far past the target each beam is followed: ``target_conflict_beyond`` mm if set, else half the calibrated
     focal length (FLHM) at that vertex's focal distance - the far edge of PlanTUS' own focal ellipsoid."""
@@ -209,13 +221,8 @@ def beyond_mm(cfg: dict, distances: np.ndarray, plantus) -> np.ndarray:
     if fixed is not None:
         return np.full(len(distances), float(fixed))
     lo, hi = float(cfg["min_distance"]), float(cfg["max_distance"])
-    grid = np.arange(lo, hi + 0.5, 0.5)
-    table = np.array([plantus.compute_FLHM_for_focal_distance(f, cfg["focal_distance_list"], cfg["flhm_list"])
-                      for f in (grid if len(cfg["flhm_list"]) > 1 else grid[:1])])
-    if table.size == 1:
-        return np.full(len(distances), table[0] / 2.0)
-    focal = np.clip(distances + float(cfg["additional_offset"]), lo, hi)  # as prepare_acoustic_simulation does
-    return np.interp(focal, grid, table) / 2.0
+    focal = np.clip(np.asarray(distances) + float(cfg["additional_offset"]), lo, hi)  # as prepare_acoustic_simulation does
+    return flhm_function(cfg, plantus)(focal) / 2.0
 
 
 def beam_lengths(origins: np.ndarray, target: np.ndarray, beyond: np.ndarray, mask: ConflictMask, region: np.ndarray,
@@ -231,7 +238,8 @@ def beam_lengths(origins: np.ndarray, target: np.ndarray, beyond: np.ndarray, ma
     if idx.size == 0:
         return out
     o = np.asarray(origins, float)[idx]
-    vec = np.asarray(target, float) - o
+    target = np.asarray(target, float)
+    vec = (target[idx] if target.ndim == 2 else target) - o
     dist = np.linalg.norm(vec, axis=1)
     unit = vec / dist[:, None]
     total = dist + np.asarray(beyond, float)[idx]  # beam length to follow, per vertex
@@ -289,7 +297,7 @@ def compute_target_conflict(skin_xyz: np.ndarray, target: np.ndarray, specs: Seq
     full_mm = float(cfg.get("target_conflict_full_mm", 20.0))
     wt = float(cfg.get("weight_target_conflict", 1.0))
     skin_xyz = np.asarray(skin_xyz, float)
-    target = np.asarray(target, float)
+    target = np.asarray(target, float)  # one point for everyone, or one aim point per skin vertex (target overlap)
     dist = np.linalg.norm(skin_xyz - target, axis=1)
     beyond = beyond_mm(cfg, dist, plantus)
 
@@ -347,7 +355,7 @@ SETTING_KEYS = ("weight_target_conflict", "target_conflict_margin", "target_conf
 
 
 def prepare(t1_path: str, outdir: str, cfg: dict, cli_specs: Sequence[str] = (), folder: Optional[str] = None,
-            base_dir: Optional[str] = None) -> dict:
+            base_dir: Optional[str] = None, overlap: bool = False, min_overlap: Optional[float] = None) -> dict:
     """Check and stage the conflict masks for one run.
 
     Every mask must be on the T1w grid (same shape and affine). A binarised copy, keeping the file's stem so the mask
@@ -361,8 +369,21 @@ def prepare(t1_path: str, outdir: str, cfg: dict, cli_specs: Sequence[str] = (),
                       if (f.endswith(".nii") or f.endswith(".nii.gz")) and not f.startswith("."))
     raw += list(cli_specs or [])
     check_settings(cfg)
+    # Target overlap (tube mode) is staged here too, so one signature covers every setting that makes a finished run out of date.
+    ov_settings = {}
+    if overlap or str(cfg.get("target_overlap", False)).lower() in ("true", "tube", "on", "1", "yes"):
+        ov = float(min_overlap if min_overlap is not None else cfg.get("target_overlap_min", 0.5))
+        if not 0.0 <= ov <= 1.0:
+            raise ValueError("the minimum overlap must be between 0 and 1")
+        ov_settings = {"target_overlap": True, "target_overlap_min": ov}
+        for k in ("focus_width_mm", "target_overlap_max_aims", "target_overlap_focus_points", "target_overlap_tract_points"):
+            if k in cfg:
+                ov_settings[k] = cfg[k]
     if not raw:
-        return {"specs": [], "settings": {}, "signature": "none"}
+        if not ov_settings:
+            return {"specs": [], "settings": {}, "signature": "none"}
+        sig = hashlib.md5(json.dumps({"overlap": ov_settings}, sort_keys=True).encode()).hexdigest()
+        return {"specs": [], "settings": ov_settings, "signature": sig}
     parsed = []
     for r in raw:
         s = parse_spec(r, cfg, base_dir)
@@ -399,8 +420,11 @@ def prepare(t1_path: str, outdir: str, cfg: dict, cli_specs: Sequence[str] = (),
     settings = {k: cfg[k] for k in SETTING_KEYS if k in cfg}
     settings["target_conflict_masks"] = [{"path": s["path"], "margin": s["margin"], "mode": s["mode"], "weight": s["weight"]}
                                          for s in specs]
-    sig = hashlib.md5(json.dumps(fingerprint(specs, {**cfg, **settings}), sort_keys=True).encode()).hexdigest()
-    return {"specs": specs, "settings": settings, "signature": sig}
+    payload = fingerprint(specs, {**cfg, **settings})
+    if ov_settings:
+        payload = {"conflict": payload, "overlap": ov_settings}  # (the format is unchanged when overlap is off)
+    sig = hashlib.md5(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+    return {"specs": specs, "settings": {**settings, **ov_settings}, "signature": sig}
 
 
 def _main(argv=None) -> int:
@@ -420,6 +444,8 @@ def _main(argv=None) -> int:
     p.add_argument("--weight", type=float, help="weight_target_conflict")
     p.add_argument("--margin", type=float, help="default margin in mm")
     p.add_argument("--mode", choices=MODES, help="default mode")
+    p.add_argument("--target-overlap", action="store_true", help="target overlap (tube mode) is on")
+    p.add_argument("--min-overlap", type=float, help="minimum overlap fraction (0-1) for target overlap")
     p.add_argument("--settings-json", help="write the settings to merge into the PlanTUS config here")
     a = ap.parse_args(argv)
     cfg = yaml.safe_load(open(a.config)) if a.config else {}
@@ -427,7 +453,8 @@ def _main(argv=None) -> int:
         if val is not None:
             cfg[key] = val
     try:
-        res = prepare(a.t1, a.outdir, cfg, a.mask, a.dir, os.path.dirname(os.path.abspath(a.config)) if a.config else None)
+        res = prepare(a.t1, a.outdir, cfg, a.mask, a.dir, os.path.dirname(os.path.abspath(a.config)) if a.config else None,
+                      overlap=a.target_overlap, min_overlap=a.min_overlap)
     except (ValueError, FileNotFoundError) as e:
         sys.exit("Error: %s" % e)
     if a.settings_json:

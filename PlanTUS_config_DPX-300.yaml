@@ -58,3 +58,12 @@ weight_skull_thickness: 0.2
 # target_conflict_mode: hard             # hard: any conflict removes the position. soft: penalised by beam length inside
 # target_conflict_full_mm: 20.0          # soft mode: mm of beam inside a mask that gives utility 0
 # target_conflict_beyond: null           # mm to follow the beam past the target; null = half the calibrated focal length
+# Optional: target overlap (tube mode) -- for tube-like targets such as a white-matter tract, where aiming at the centroid is
+# wrong. Every placement is aimed at the best point INSIDE the target; the score is the overlap of PlanTUS' focal zone with
+# the target relative to the smaller of the two (a small target fully covered, or a focus neatly inside a large target,
+# scores 1). Distance and tilt are measured to the chosen aim point. Positions below the minimum overlap are removed.
+# Off unless switched on here or with --target-overlap [--min-overlap F]. See code/TargetOverlap.py.
+# target_overlap: false
+# target_overlap_min: 0.5                # fraction (0-1); positions below this overlap are removed
+# focus_width_mm: 5.0                    # lateral width of the focal zone (PlanTUS draws it 5 mm wide)
+# target_overlap_max_aims: 80            # aim points tried per position (the target's voxels thinned to this many)

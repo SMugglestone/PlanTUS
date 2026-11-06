@@ -59,6 +59,13 @@ if __name__ == "__main__":
     parser.add_argument("--overwrite", action="store_true", help="If existing PlanTUS results are found for the same inputs, overwrite them without prompting.")
     parser.add_argument("--reuse_existing", action="store_true", help="If existing PlanTUS results are found for the same inputs, reuse them without prompting.")
 
+    parser.add_argument("--target-overlap", action="store_true",
+                        help="Target overlap (for tube-like targets such as a white-matter tract): aim every placement at the best point "
+                             "INSIDE the target and score how much of the focus lies in the target / how much of the target the focus "
+                             "covers. Off by default. See code/TargetOverlap.py.")
+    parser.add_argument("--min-overlap", type=float, default=None, metavar="FRACTION",
+                        help="With --target-overlap: positions whose overlap is below this fraction (0-1) are removed "
+                             "(default: target_overlap_min in the config, else 0.5).")
     parser.add_argument("--conflict-mask", action="append", default=[], metavar="FILE[,margin=MM][,mode=hard|soft][,weight=W]",
                         help="Target conflict: a mask (in the T1's space) whose region the beam should not pass through, or "
                              "close to. Repeatable. margin/mode/weight default to target_conflict_margin / target_conflict_mode "
@@ -91,6 +98,10 @@ target_roi_filepath = args.roi
 with open(args.config, 'r') as file:
     config = yaml.safe_load(file)
 config_dir = os.path.dirname(os.path.abspath(args.config))  # taken now: the wrapper changes directory below
+if args.target_overlap:
+    config["target_overlap"] = True
+if args.min_overlap is not None:
+    config["target_overlap_min"] = args.min_overlap
 
 IDTarget = config.get("IDTarget", "")
 
@@ -155,6 +166,12 @@ sys.path.append(plantus_code_path)
 os.chdir(plantus_code_path)
 import PlanTUS as PlanTUS
 import TargetConflict
+import TargetOverlap
+
+# Target overlap (tube mode); off unless switched on, and then every change below applies only to that mode
+overlap_on = TargetOverlap.enabled(config)
+overlap_settings = TargetOverlap.settings(config)
+overlap_min = float(overlap_settings["target_overlap_min"])
 
 # Target conflict masks (config list + --conflict-mask); empty means the metric is off and nothing below changes
 conflict_specs = TargetConflict.collect_specs(config, args.conflict_mask, base_dir=config_dir)
@@ -211,6 +228,8 @@ current_run_parameters = {
     "weight_skin_skull_angles": weight_skin_skull_angles,
     "weight_skull_thickness": weight_skull_thickness,
 }
+if overlap_on:
+    current_run_parameters["target_overlap"] = TargetOverlap.fingerprint(config, target_roi_filepath)
 _tc_fingerprint = TargetConflict.fingerprint(conflict_specs, config)
 if _tc_fingerprint:  # only present when masks are given, so runs without them keep their old fingerprint
     current_run_parameters["target_conflict"] = _tc_fingerprint
@@ -226,9 +245,19 @@ def composite_basename(with_conflict=True):
         f"SkinSkullAngle{weight_skin_skull_angles}_"
         f"SkullThickness{weight_skull_thickness}"
     )
+    if overlap_on:
+        base += f"_TargetOverlap{overlap_min}"
     if with_conflict and conflict_specs:
         base += f"_TargetConflict{weight_target_conflict}"
     return base
+
+
+def aim_for(vertex):
+    """The point inside the target chosen as the aim for a skin vertex in target-overlap mode (None otherwise)."""
+    if not overlap_on:
+        return None
+    import nibabel as _nib
+    return [float(_nib.load(os.path.join(output_path, f"target_overlap-aim{c}_skin.func.gii")).darrays[0].data[vertex]) for c in "xyz"]
 
 # Files that only exist once the full computation has completed successfully
 surface_files = [
@@ -298,6 +327,14 @@ if args.babelbrain_integration and (args.placement_only >= 0 or args.skip_viewer
 
 if args.placement_only<0:
     if not skip_computation:
+        # Output files of an earlier run in this folder (other masks, other settings, or none) must not be mistaken for this run's results by
+        # anything that globs composite_*skin.func.gii, so they are removed FIRST, before this run writes any of its own.
+        for _pattern in ("composite_*_skin.func.gii", "composite-noconflict_*_skin.func.gii", "target_conflict-*_skin.func.gii",
+                         "target_conflict-*.nii.gz", "target_conflict-*_3Dmodel.*", "target_conflict_utility_skin.func.gii",
+                         "target_conflict.json", "composite-base_*_skin.func.gii", "target_overlap_skin.func.gii", "target_overlap-*_skin.func.gii",
+                         "target_overlap.json"):
+            for _stale in glob.glob(os.path.join(output_path, _pattern)):
+                os.remove(_stale)
         # -----------------------------------------------------------------------------
         # Convert SimNIBS meshes to surfaces (STL + GIFTI); annotate structures
         # -----------------------------------------------------------------------------
@@ -346,7 +383,21 @@ if args.placement_only<0:
         # -----------------------------------------------------------------------------
         # Distances skin → target center
         center = PlanTUS.roi_center_of_gravity(target_roi_filepath)
-        skin_target_distances = PlanTUS.distance_between_surface_and_point(os.path.join(output_path, "skin.surf.gii"), center)
+        if overlap_on:
+            # Best aim point inside the target for every candidate position, and the overlap it gives (code/TargetOverlap.py)
+            _skin_path = os.path.join(output_path, "skin.surf.gii")
+            _skin_xyz, _skin_nrm = PlanTUS.compute_surface_metrics(_skin_path)
+            overlap = TargetOverlap.compute(_skin_xyz, _skin_nrm, TargetOverlap.Tract(target_roi_filepath), config, PlanTUS,
+                                            np.asarray(avoidance_mask) > 0)
+            aim_points = overlap["aim"]
+            for _name, _vals in (("target_overlap", overlap["coefficient"]), ("target_overlap-focusintract", overlap["precision"]),
+                                 ("target_overlap-tractcovered", overlap["coverage"]), ("target_overlap-aimx", aim_points[:, 0]),
+                                 ("target_overlap-aimy", aim_points[:, 1]), ("target_overlap-aimz", aim_points[:, 2])):
+                PlanTUS.create_metric_from_pseudo_nifti(_name, _vals, _skin_path)
+                PlanTUS.add_structure_information(os.path.join(output_path, f"{_name}_skin.func.gii"), "CORTEX_LEFT")
+            skin_target_distances = np.linalg.norm(np.asarray(_skin_xyz) - aim_points, axis=1)  # distance to the aim point
+        else:
+            skin_target_distances = PlanTUS.distance_between_surface_and_point(os.path.join(output_path, "skin.surf.gii"), center)
         PlanTUS.create_metric_from_pseudo_nifti("distances", skin_target_distances, os.path.join(output_path, "skin.surf.gii"))
         PlanTUS.mask_metric(os.path.join(output_path, "distances_skin.func.gii"), os.path.join(output_path, "avoidance_skin.func.gii"))
         PlanTUS.add_structure_information(os.path.join(output_path, "distances_skin.func.gii"), "CORTEX_LEFT")
@@ -359,6 +410,8 @@ if args.placement_only<0:
         angles = []
         _, skin_normals = PlanTUS.compute_surface_metrics(os.path.join(output_path, "skin.surf.gii"))
         skin_vecs = PlanTUS.vectors_between_surface_and_point(os.path.join(output_path, "skin.surf.gii"), center)
+        if overlap_on:
+            skin_vecs = np.asarray(_skin_xyz) - aim_points  # tilt is measured to the chosen aim point
         for i in range(len(skin_vecs)):
             angles.append(math.degrees(PlanTUS.angle_between_vectors(skin_vecs[i], skin_normals[i])))
         angles = np.abs(np.asarray(angles))
@@ -388,6 +441,8 @@ if args.placement_only<0:
                 hit_vals.append(0)
 
         target_intersection = np.asarray(hit_vals)
+        if overlap_on:
+            target_intersection = overlap["coefficient"]  # the overlap replaces the target-intersection length (0-1, absolute)
         PlanTUS.create_metric_from_pseudo_nifti("target_intersection", target_intersection, os.path.join(output_path, "skin.surf.gii"))
         PlanTUS.mask_metric(os.path.join(output_path, "target_intersection_skin.func.gii"), os.path.join(output_path, "avoidance_skin.func.gii"))
         PlanTUS.add_structure_information(os.path.join(output_path, "target_intersection_skin.func.gii"), "CORTEX_LEFT")
@@ -568,6 +623,8 @@ if args.placement_only<0:
             u_L = np.clip(((L - L_min) / (L_max - L_min)) ** p_L, 0, 1)
         else:
             u_L = np.zeros_like(L)
+        if overlap_on:
+            u_L = np.clip(L, 0, 1)  # the overlap coefficient is already an absolute utility
 
         # Tilt utility (smaller angles are better)
         A = angles_m.astype(float)
@@ -611,13 +668,22 @@ if args.placement_only<0:
 
         # Target conflict: penalise positions whose beam passes through (or near) the conflict mask(s). The composite
         # without it is kept (composite-noconflict_*) so it can be recombined with a different margin, e.g. in the viewer.
-        # Files from an earlier run in this folder (with other masks, or none) must not be mistaken for this run's results
-        # by anything that globs composite_*skin.func.gii, so they are removed first.
-        for _pattern in ("composite_*_skin.func.gii", "composite-noconflict_*_skin.func.gii", "target_conflict-*_skin.func.gii",
-                         "target_conflict-*.nii.gz", "target_conflict-*_3Dmodel.*", "target_conflict_utility_skin.func.gii",
-                         "target_conflict.json"):
-            for _stale in glob.glob(os.path.join(output_path, _pattern)):
-                os.remove(_stale)
+        _before_cut = composite_metric  # (without target overlap there is no cut)
+        if overlap_on:  # keep the composite before the minimum-overlap cut (the viewer re-applies the cut live), then cut
+            _base = composite_basename(False).replace("composite_", "composite-base_", 1)
+            PlanTUS.create_metric_from_pseudo_nifti(_base, composite_metric, os.path.join(output_path, "skin.surf.gii"))
+            PlanTUS.mask_metric(os.path.join(output_path, _base + "_skin.func.gii"), os.path.join(output_path, "avoidance_skin.func.gii"))
+            PlanTUS.add_structure_information(os.path.join(output_path, _base + "_skin.func.gii"), "CORTEX_LEFT")
+            composite_metric = composite_metric * TargetOverlap.apply_minimum(overlap["coefficient"], overlap_min)
+            _removed = int(np.count_nonzero((_before_cut > 0) & (composite_metric == 0)))
+            print(f"Target overlap: the minimum overlap of {overlap_min:g} removes {_removed} positions that could otherwise be used.")
+            if _before_cut.max() > 0 and composite_metric.max() <= 0:
+                raise RuntimeError("No transducer position reaches the minimum target overlap of %g; lower --min-overlap "
+                                   "(best overlap found: %.2f)." % (overlap_min, float(overlap["coefficient"].max())))
+            _ov_summary = {**overlap["summary"], "minimum_overlap": overlap_min}
+            import json as _json
+            with open(os.path.join(output_path, "target_overlap.json"), "w") as _f:
+                _json.dump(_ov_summary, _f, indent=2)
         if conflict_specs:
             skin_surface_filepath = os.path.join(output_path, "skin.surf.gii")
             skin_xyz, _ = PlanTUS.compute_surface_metrics(skin_surface_filepath)
@@ -626,7 +692,8 @@ if args.placement_only<0:
             PlanTUS.mask_metric(os.path.join(output_path, noconflict_base + "_skin.func.gii"), os.path.join(output_path, "avoidance_skin.func.gii"))
             PlanTUS.add_structure_information(os.path.join(output_path, noconflict_base + "_skin.func.gii"), "CORTEX_LEFT")
 
-            conflict = TargetConflict.compute_target_conflict(skin_xyz, center, conflict_specs, config, composite_metric > 0,
+            conflict = TargetConflict.compute_target_conflict(skin_xyz, aim_points if overlap_on else center, conflict_specs, config,
+                                                              _before_cut > 0,  # every position that passes the other checks, so the overlap cut can be changed afterwards
                                                               output_path, PlanTUS)
             composite_metric = composite_metric * conflict["factor"]
             for _name, _d in conflict["per_mask"].items():
@@ -756,6 +823,7 @@ if args.placement_only<0:
                                             flhm_list,
                                             placement_scene_template_filepath,
                                             ID=IDTarget,
+                                            aim_point=aim_for(selection),
                                             skip_viewer=True,
                                             roll_degrees=roll_degrees,
                                             orientation_mode=orientation_mode)
@@ -832,4 +900,5 @@ else:
                                         flhm_list,
                                         placement_scene_template_filepath,
                                         ID=IDTarget,
+                                        aim_point=aim_for(args.placement_only),
                                         skip_viewer=args.skip_viewer)

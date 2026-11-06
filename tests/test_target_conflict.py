@@ -258,6 +258,16 @@ def main():
     check("the no-mesh fallback (walking the beam) agrees with the mesh method", np.abs(with_mesh - walked).mean() < 0.5,
           "(mean difference %.2f mm over %d beams)" % (np.abs(with_mesh - walked).mean(), len(origins)))
 
+    # 17. target overlap is part of the staging signature (a change redoes finished runs); conflict-only signatures are unchanged
+    ovm = os.path.join(tmp, "ovmask.nii.gz")
+    sphere_mask(ovm, [((0.0, 0.0, -12.0), 6.0)])
+    base_sig = TC.prepare(t1, os.path.join(tmp, "o1"), {}, [ovm + ",margin=5"])["signature"]
+    ov_sig = TC.prepare(t1, os.path.join(tmp, "o2"), {}, [ovm + ",margin=5"], overlap=True)["signature"]
+    ov_sig2 = TC.prepare(t1, os.path.join(tmp, "o3"), {}, [ovm + ",margin=5"], overlap=True, min_overlap=0.7)["signature"]
+    only_ov = TC.prepare(t1, os.path.join(tmp, "o4"), {}, [], overlap=True)
+    check("target overlap changes the signature, and so does its minimum", len({base_sig, ov_sig, ov_sig2}) == 3)
+    check("overlap alone (no conflict masks) still gives a signature and settings", only_ov["signature"] != "none" and only_ov["settings"]["target_overlap"] is True and only_ov["settings"]["target_overlap_min"] == 0.5)
+
     n_fail = RESULTS.count(False)
     print("\n%d checks, %d failed" % (len(RESULTS), n_fail))
     return 1 if n_fail else 0

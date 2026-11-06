@@ -220,6 +220,16 @@ For every skin vertex the beam is the line from the vertex to the target centre,
 
 This is a geometric planning aid, not a safety check: it ignores skull aberration and side lobes. Pass the chosen trajectory through a full acoustic simulation (e.g. BabelBrain).
 
+## Target overlap (optional, tube mode): targets that are not compact blobs
+
+PlanTUS normally aims every placement at the centre of the target mask. For an elongated target such as a white-matter tract that is the wrong aim (the centre of a curved tract can lie outside it), and what matters is how much of the ultrasound focus actually lies in the tract. Switch tube mode on with `--target-overlap` (and `--min-overlap 0.5`):
+
+```
+simnibs_python PlanTUS_wrapper.py T1.nii.gz head.msh tract.nii.gz config.yaml --target-overlap --min-overlap 0.5
+```
+
+For each skin position it finds the best aim point inside the target (within the depth range and the `max_angle` tilt limit), models the focus as PlanTUS does (an ellipsoid as long as the calibrated focal length FLHM and 5 mm wide), and scores the **overlap coefficient**: the overlap between focus and target divided by the smaller of the two. A target smaller than the focus is scored by how much of it is covered; a target larger than the focus by how much of the focus lies inside it, so a beam sitting neatly inside a big tract scores 1. Both fractions are written out separately. Distance and tilt are measured to the aim point, positions below the minimum overlap are removed, and the placement and BabelBrain trajectory are aimed at the chosen point. For thin tracts this is strict: it leaves only the positions from which the beam can run close to the tract's direction. It is off by default, and with it off nothing changes. `tests/test_target_overlap.py` checks the geometry.
+
 ## 2. Run the *PlanTUS_wrapper.py* script
 
 Based on the subject-specific, 3D-reconstructed skin and skull surfaces as well as the mask of the target region, PlanTUS computes several per-vertex metrics across the entire head surface to help you intuitively evaluate potential transducer positions. See [Output reference](#output-reference) below for the full list and how they combine into a single composite score. In brief:

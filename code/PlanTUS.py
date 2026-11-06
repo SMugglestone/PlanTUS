@@ -1574,7 +1574,8 @@ def prepare_acoustic_simulation(vertex_number: int,
                                 ID="",
                                 skip_viewer=False,
                                 roll_degrees: float = 0.0,
-                                orientation_mode: str = "target_centered") -> str:
+                                orientation_mode: str = "target_centered",
+                                aim_point=None) -> str:
     """End-to-end preparation for one candidate vertex (simulation folder).
 
     Returns the path of the generated BabelBrain trajectory file.
@@ -1613,15 +1614,19 @@ def prepare_acoustic_simulation(vertex_number: int,
 
     # --- Surfaces and vectors
     skin_coordinates, skin_normals = compute_surface_metrics(os.path.join(output_path, "skin.surf.gii"))
-    target_center = roi_center_of_gravity(target_roi_filepath)
+    # ``aim_point`` (target-overlap mode): aim at this point inside the target instead of the ROI's centre of gravity.
+    target_center = np.asarray(aim_point, dtype=float) if aim_point is not None else roi_center_of_gravity(target_roi_filepath)
     skin_target_vectors = vectors_between_surface_and_point(os.path.join(output_path, "skin.surf.gii"), target_center)
 
-    skin_target_intersections = compute_vector_mesh_intersections(
-        skin_coordinates[vertex_number : vertex_number + 1],
-        skin_normals[vertex_number : vertex_number + 1],
-        os.path.join(output_path, f"{target_roi_name}_3Dmodel.stl"),
-        200
-    )  # Only compute the vertex that is selected later
+    if aim_point is None:
+        skin_target_intersections = compute_vector_mesh_intersections(
+            skin_coordinates[vertex_number : vertex_number + 1],
+            skin_normals[vertex_number : vertex_number + 1],
+            os.path.join(output_path, f"{target_roi_name}_3Dmodel.stl"),
+            200
+        )  # Only compute the vertex that is selected later
+    else:
+        skin_target_intersections = [[]]  # aimed at a chosen point: the focus is at that point, not where a normal ray crosses the ROI
     skin_target_intersection_values = []
     for inter in skin_target_intersections:
         if len(inter) == 1:
@@ -1661,7 +1666,6 @@ def prepare_acoustic_simulation(vertex_number: int,
     # so inter_center is available below for the BabelBrain trajectory
     # anchor point too, without duplicating this computation.
     if skin_target_intersection_values[0] == 0:
-        target_center = roi_center_of_gravity(target_roi_filepath)
         skin_target_distances = distance_between_surface_and_point(os.path.join(output_path, "skin.surf.gii"), target_center)
         focal_distance = float(skin_target_distances[vertex_number] + additional_offset)
         inter_center = None
@@ -1717,7 +1721,7 @@ def prepare_acoustic_simulation(vertex_number: int,
         else:
             babelbrain_anchor_coordinates = vertex_coordinates + focal_distance * vertex_vector
     else:
-        babelbrain_anchor_coordinates = roi_center_of_gravity(target_roi_filepath)
+        babelbrain_anchor_coordinates = target_center  # the ROI's centre of gravity, or the chosen aim point
 
     babelbrain_trajectory_path = os.path.join(
         output_path_vtx, f"{target_roi_name}_{suffix}_Trajectory_BabelBrain.txt")
