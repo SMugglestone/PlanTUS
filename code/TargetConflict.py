@@ -36,6 +36,7 @@ import hashlib
 import json
 import os
 import re
+import sys
 from typing import Dict, List, Optional, Sequence
 
 import nibabel as nib
@@ -355,10 +356,12 @@ SETTING_KEYS = ("weight_target_conflict", "target_conflict_margin", "target_conf
 
 
 def prepare(t1_path: str, outdir: str, cfg: dict, cli_specs: Sequence[str] = (), folder: Optional[str] = None,
-            base_dir: Optional[str] = None, overlap: bool = False, min_overlap: Optional[float] = None) -> dict:
+            base_dir: Optional[str] = None, overlap: bool = False, min_overlap: Optional[float] = None,
+            allow_misaligned: bool = False) -> dict:
     """Check and stage the conflict masks for one run.
 
-    Every mask must be on the T1w grid (same shape and affine). A binarised copy, keeping the file's stem so the mask
+    Every mask must be on the T1w grid (same shape and affine), unless ``allow_misaligned`` is set: then a mask that is not
+    is resampled onto the T1w grid (nearest neighbour) with a warning, for quick tests. A binarised copy, keeping the file's stem so the mask
     keeps its name, is written to ``outdir``. Returns ``{"specs", "settings", "signature"}``: ``settings`` is what the
     scripts merge into the PlanTUS config, and ``signature`` identifies the conflict set-up so a finished run can be
     recognised as out of date when a mask or setting changes ("none" when there are no masks).
@@ -396,11 +399,17 @@ def prepare(t1_path: str, outdir: str, cfg: dict, cli_specs: Sequence[str] = (),
     specs, used = [], set()
     for s in parsed:
         img = nib.load(s["path"])
-        if img.shape[:3] != t1.shape[:3] or not np.allclose(img.affine, t1.affine, atol=1e-3):
-            raise ValueError("conflict mask %s is not on the T1w grid (shape/affine differ); resample it to the T1w first"
-                             % os.path.basename(s["path"]))
         data = np.asanyarray(img.dataobj)
-        data = (data[..., 0] if data.ndim == 4 else data) > 0
+        data = data[..., 0] if data.ndim == 4 else data
+        if img.shape[:3] != t1.shape[:3] or not np.allclose(img.affine, t1.affine, atol=1e-3):
+            if not allow_misaligned:
+                raise ValueError("conflict mask %s is not on the T1w grid (shape/affine differ); resample it to the T1w first"
+                                 % os.path.basename(s["path"]))
+            from nibabel.processing import resample_from_to
+            print("Warning: conflict mask %s is not on the T1w grid; resampled onto it (nearest neighbour) because of --allow-misaligned"
+                  % os.path.basename(s["path"]), file=sys.stderr)
+            data = np.asanyarray(resample_from_to(nib.Nifti1Image((data > 0).astype(np.uint8), img.affine), (t1.shape[:3], t1.affine), order=0).dataobj)
+        data = data > 0
         if not data.any():
             raise ValueError("conflict mask %s is empty" % os.path.basename(s["path"]))
         stem = os.path.basename(s["path"]).replace(".nii.gz", "").replace(".nii", "")
@@ -429,7 +438,6 @@ def prepare(t1_path: str, outdir: str, cfg: dict, cli_specs: Sequence[str] = (),
 
 def _main(argv=None) -> int:
     import argparse
-    import sys
 
     import yaml
 
@@ -446,6 +454,7 @@ def _main(argv=None) -> int:
     p.add_argument("--mode", choices=MODES, help="default mode")
     p.add_argument("--target-overlap", action="store_true", help="target overlap (tube mode) is on")
     p.add_argument("--min-overlap", type=float, help="minimum overlap fraction (0-1) for target overlap")
+    p.add_argument("--allow-misaligned", action="store_true", help="resample masks that are not on the T1w grid instead of stopping")
     p.add_argument("--settings-json", help="write the settings to merge into the PlanTUS config here")
     a = ap.parse_args(argv)
     cfg = yaml.safe_load(open(a.config)) if a.config else {}
@@ -454,7 +463,7 @@ def _main(argv=None) -> int:
             cfg[key] = val
     try:
         res = prepare(a.t1, a.outdir, cfg, a.mask, a.dir, os.path.dirname(os.path.abspath(a.config)) if a.config else None,
-                      overlap=a.target_overlap, min_overlap=a.min_overlap)
+                      overlap=a.target_overlap, min_overlap=a.min_overlap, allow_misaligned=a.allow_misaligned)
     except (ValueError, FileNotFoundError) as e:
         sys.exit("Error: %s" % e)
     if a.settings_json:

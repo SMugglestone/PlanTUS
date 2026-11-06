@@ -182,6 +182,11 @@ def main():
         check("a mask off the T1 grid is rejected", False)
     except ValueError as e:
         check("a mask off the T1 grid is rejected", "T1w grid" in str(e))
+    rs = TC.prepare(t1, os.path.join(tmp, "s3b"), {}, [off_grid], allow_misaligned=True)  # a 100^3 sphere (radius 5) on a coarser/smaller grid
+    st = nib.load(rs["specs"][0]["path"])
+    vox = int(np.asanyarray(st.dataobj).sum())
+    check("allow_misaligned resamples an off-grid mask onto the T1 grid, keeping its size", st.shape == nib.load(t1).shape
+          and np.allclose(st.affine, nib.load(t1).affine) and abs(vox - 523) < 60, "(%d voxels, expected about 523)" % vox)
     # a changed file changes the signature
     sphere_mask(mk, [((0.0, 0.0, -12.0), 7.0)])
     check("editing the mask changes the signature", TC.prepare(t1, os.path.join(tmp, "staged"), {"target_conflict_margin": 3.0}, [mk + ",margin=5,mode=soft"])["signature"] != sig_a)
